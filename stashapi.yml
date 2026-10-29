@@ -1,0 +1,19 @@
+name: "Stash API"
+description: "Official plugin API for Stash"
+version: "1.4.5"
+
+ui:
+  javascript:
+    - app.js
+  assets:
+    /: assets
+
+exec:
+  - powershell
+  - "-ExecutionPolicy"
+  - "Bypass"
+  - "-File"
+  - "{pluginDir}/bootstrap.ps1"
+
+interface: raw
+errLog: none
