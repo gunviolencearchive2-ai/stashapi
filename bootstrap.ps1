@@ -83,24 +83,48 @@ if ($input -and $input.action -eq 'hello') {
             server_port = [int]$port
         }
     }
-    $output | ConvertTo-Json
+    $output | ConvertTo-Json -Compress
     exit 0
 }
 
-# Forward other actions to server.py /execute
-if ($port -and $serverUp) {
-    try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body $inputStr -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
-        if ($r) {
-            $content = $r.Content
-            if ($content) { Write-Output $content }
-        } else {
-            Write-Output '{"output":{},"error":"no response from server"}'
+# Route actions
+if ($input -and $input.action -eq 'exec') {
+    # Terminal command — forward to server.py
+    if ($port -and $serverUp) {
+        try {
+            $serverBody = @{ cmd = $input.cmd } | ConvertTo-Json -Compress
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body $serverBody -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
+            if ($r) {
+                $content = $r.Content
+                if ($content) {
+                    $outObj = @{
+                        output = @{
+                            out = $content
+                            err = ''
+                            code = 0
+                            cwd = (Get-Location).Path
+                        }
+                    }
+                    $outObj | ConvertTo-Json -Compress
+                } else {
+                    Write-Output '{"output":{"out":"","err":"","code":0,"cwd":""}}'
+                }
+            } else {
+                Write-Output '{"output":{"out":"","err":"no response from server","code":1,"cwd":""}}'
+            }
+        } catch {
+            Write-Output ('{"output":{"out":"","err":"' + $_.Exception.Message + '","code":1,"cwd":""}}')
         }
-    } catch {
-        Write-Output ('{"output":{},"error":"' + $_.Exception.Message + '"}')
+    } else {
+        Write-Output '{"output":{"out":"","err":"terminal server not available","code":1,"cwd":""}}'
     }
 } else {
-    Write-Output '{"output":{},"error":"terminal server not available"}'
+    # Other actions (list, download, etc.) — forward to app.py
+    try {
+        $inputStr | & $pyExe "$dir\app.py"
+        exit $LASTEXITCODE
+    } catch {
+        Write-Output ('{"output":{"out":"","err":"' + $_.Exception.Message + '","code":1,"cwd":""}}')
+    }
 }
 exit 0
