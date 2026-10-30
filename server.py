@@ -171,6 +171,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.send_header('Connection', 'close')
         self._cors()
         self.end_headers()
 
