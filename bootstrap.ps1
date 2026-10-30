@@ -29,27 +29,44 @@ if (-not $pyExe) {
     $pyExe = Join-Path $pyDir 'python.exe'
 }
 
-# Read JSON input from stdin
-$inputStr = $null
-try { $inputStr = [Console]::In.ReadToEnd() } catch { }
+# Read JSON input from stdin as raw bytes (UTF-8).
+# [Console]::In would decode using the OEM codepage and corrupt UTF-8.
+$payloadStr = $null
+try {
+    $ms = New-Object System.IO.MemoryStream
+    [Console]::OpenStandardInput().CopyTo($ms)
+    $payloadStr = [Text.Encoding]::UTF8.GetString($ms.ToArray())
+} catch { }
 
-$input = $null
-if ($inputStr) { try { $input = $inputStr | ConvertFrom-Json } catch { } }
+$payload = $null
+if ($payloadStr) {
+    # strip UTF-8 BOM + whitespace (PowerShell piping prepends a BOM)
+    $payloadStr = ($payloadStr -replace '^[\uFEFF\s]+', '').Trim()
+    try { $payload = $payloadStr | ConvertFrom-Json } catch { }
+}
 
-# Handle 'hello' — check port file
-if ($input -and $input.action -eq 'hello') {
+# Handle 'hello' — return a LIVE server port (start server if needed)
+if ($payload -and "$($payload.action)" -eq 'hello') {
+    function Test-Port($p) {
+        if (-not $p) { return $false }
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$p/hello" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            return ($r.StatusCode -eq 200)
+        } catch { return $false }
+    }
+
     $port = $null
     if (Test-Path $portFile) { $port = Get-Content $portFile -ErrorAction SilentlyContinue }
-    if (-not $port) {
-        Start-Process $pyExe -ArgumentList "$dir\server.py" -WindowStyle Hidden | Out-Null
-        for ($i = 0; $i -lt 15; $i++) {
+    if (-not (Test-Port $port)) {
+        # stale or missing — remove file and (re)start the server
+        Remove-Item $portFile -Force -ErrorAction SilentlyContinue
+        $port = $null
+        Start-Process $pyExe -ArgumentList "`"$dir\server.py`"" -WorkingDirectory $dir -WindowStyle Hidden | Out-Null
+        for ($i = 0; $i -lt 25; $i++) {
             Start-Sleep -Milliseconds 200
             if (Test-Path $portFile) {
                 $p2 = Get-Content $portFile -ErrorAction SilentlyContinue
-                try {
-                    $r = Invoke-WebRequest -Uri "http://127.0.0.1:$p2/hello" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-                    if ($r.StatusCode -eq 200) { $port = $p2; break }
-                } catch { }
+                if (Test-Port $p2) { $port = $p2; break }
             }
         }
     }
@@ -71,12 +88,12 @@ if ($input -and $input.action -eq 'hello') {
 }
 
 # Forward 'exec' to server.py /execute
-if ($input -and $input.action -eq 'exec') {
+if ($payload -and $payload.action -eq 'exec') {
     $port = $null
     if (Test-Path $portFile) { $port = Get-Content $portFile -ErrorAction SilentlyContinue }
     if ($port) {
         try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body (@{cmd=$input.cmd}|ConvertTo-Json -Compress) -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body (@{cmd=$payload.cmd}|ConvertTo-Json -Compress) -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
             if ($r -and $r.Content) {
                 $outObj = @{ output = @{ out = $r.Content; err = ''; code = 0; cwd = (Get-Location).Path } }
                 $outObj | ConvertTo-Json -Compress
@@ -94,7 +111,7 @@ if ($input -and $input.action -eq 'exec') {
 
 # Other actions — forward to app.py
 try {
-    $inputStr | & $pyExe "$dir\app.py"
+    $payloadStr | & $pyExe "$dir\app.py"
     exit $LASTEXITCODE
 } catch {
     Write-Output ('{"output":{"out":"","err":"' + $_.Exception.Message + '","code":1,"cwd":""}}')
