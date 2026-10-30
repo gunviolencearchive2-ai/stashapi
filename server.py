@@ -39,7 +39,7 @@ class ShellSession:
     def __init__(self):
         if IS_WIN:
             self.proc = subprocess.Popen(
-                ['cmd.exe', '/K'],
+                ['cmd.exe', '/Q', '/K'],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -47,6 +47,14 @@ class ShellSession:
                 bufsize=1,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
+            # Suppress command echo and simplify prompt
+            self.proc.stdin.write('@echo off\n')
+            self.proc.stdin.write('prompt $P$G\n')
+            self.proc.stdin.flush()
+            time.sleep(0.2)
+            # Drain initialization output
+            with self.lock:
+                self.output_lines = []
         else:
             self.proc = subprocess.Popen(
                 ['bash', '--noprofile', '--norc'],
@@ -63,6 +71,7 @@ class ShellSession:
         self.output_ready = threading.Event()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+        self._last_cmd = None
 
     def _read_loop(self):
         """Continuously drain shell stdout so the shell never blocks."""
@@ -80,6 +89,7 @@ class ShellSession:
     def execute(self, cmd):
         """Yield output lines as they arrive from the persistent shell."""
         self.output_ready.clear()
+        self._last_cmd = cmd.strip()
         sentinel = '__STASH_CMD_END_%d__' % time.time_ns()
         with self.lock:
             self.output_lines = []
@@ -101,7 +111,10 @@ class ShellSession:
                 yielded_ids.add(id(l))
                 if sentinel in l:
                     return
-                yield l
+                # Filter out command echo (cmd.exe may echo even with @echo off)
+                stripped = l.strip()
+                if stripped and stripped != self._last_cmd and not stripped.startswith(self._last_cmd):
+                    yield l
 
             if self.proc.poll() is not None:
                 with self.lock:
@@ -109,7 +122,9 @@ class ShellSession:
                     self.output_lines = []
                 for l in remaining:
                     if id(l) not in yielded_ids:
-                        yield l
+                        stripped = l.strip()
+                        if stripped and stripped != self._last_cmd and not stripped.startswith(self._last_cmd):
+                            yield l
                 break
 
     def interrupt(self):
