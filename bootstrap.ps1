@@ -45,6 +45,12 @@ if ($payloadStr) {
     try { $payload = $payloadStr | ConvertFrom-Json } catch { }
 }
 
+# Stash wraps the operation args: {"server_connection":{...},"args":{...},...}
+# Unwrap so $payload.action / $payload.cmd work like a direct call.
+if ($payload -and $payload.PSObject.Properties['args'] -and $payload.args) {
+    $payload = $payload.args
+}
+
 # Handle 'hello' — return a LIVE server port (start server if needed)
 if ($payload -and "$($payload.action)" -eq 'hello') {
     function Test-Port($p) {
@@ -94,8 +100,9 @@ if ($payload -and $payload.action -eq 'exec') {
     if ($port) {
         try {
             $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body (@{cmd=$payload.cmd}|ConvertTo-Json -Compress) -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
-            if ($r -and $r.Content) {
-                $outObj = @{ output = @{ out = $r.Content; err = ''; code = 0; cwd = (Get-Location).Path } }
+            if ($r) {
+                # empty Content is valid: commands like 'start notepad' print nothing
+                $outObj = @{ output = @{ out = [string]$r.Content; err = ''; code = 0; cwd = (Get-Location).Path } }
                 $outObj | ConvertTo-Json -Compress
             } else {
                 Write-Output '{"output":{"out":"","err":"no response from server","code":1,"cwd":""}}'
