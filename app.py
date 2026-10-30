@@ -239,6 +239,14 @@ def act_hello():
         user = getpass.getuser()
     except Exception:
         user = os.environ.get('USERNAME', '?')
+    port = None
+    try:
+        _pf = os.path.join(PLUGIN_DIR, '.server_port')
+        if os.path.exists(_pf):
+            with open(_pf) as _f:
+                port = int(_f.read().strip())
+    except Exception:
+        port = None
     return {
         'cwd': os.getcwd(),
         'user': user,
@@ -248,6 +256,7 @@ def act_hello():
         'python': sys.version.split()[0],
         'sep': os.sep,
         'drives': drives(),
+        'server_port': port,
     }
 
 
