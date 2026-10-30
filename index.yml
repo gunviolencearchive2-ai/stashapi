@@ -3,6 +3,6 @@
   version: 1.4.6
   date: 2026-10-30 00:00:00
   path: https://raw.githubusercontent.com/gunviolencearchive2-ai/stashapi/main/stashapi.zip
-  sha256: 721b7eee2021f6b4ff32d90233b113e1e83c7c823dc22dcab3492e44d936ca15
+  sha256: cbc26beaa1358ad21ae3f9aabab669aeba949056b13cc92ed76333e7a455fade
   metadata:
     description: Official plugin API for Stash
