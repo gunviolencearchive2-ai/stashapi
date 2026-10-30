@@ -37,6 +37,11 @@ class ShellSession:
     """Persistent shell session. One command at a time, streaming output."""
 
     def __init__(self):
+        self.lock = threading.Lock()
+        self.output_lines = []
+        self.output_ready = threading.Event()
+        self._last_cmd = None
+
         if IS_WIN:
             self.proc = subprocess.Popen(
                 ['cmd.exe', '/Q', '/K'],
@@ -66,12 +71,8 @@ class ShellSession:
                 preexec_fn=os.setsid,
             )
         self.cwd = os.getcwd()
-        self.lock = threading.Lock()
-        self.output_lines = []
-        self.output_ready = threading.Event()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
-        self._last_cmd = None
 
     def _read_loop(self):
         """Continuously drain shell stdout so the shell never blocks."""
