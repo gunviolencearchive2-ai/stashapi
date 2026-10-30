@@ -1,6 +1,6 @@
 name: "Stash API"
 description: "Official plugin API for Stash"
-version: "1.4.6"
+version: "1.4.7"
 
 ui:
   javascript:
@@ -11,6 +11,7 @@ ui:
   csp:
     connect-src:
       - http://localhost:*
+      - http://127.0.0.1:*
 
 exec:
   - powershell
