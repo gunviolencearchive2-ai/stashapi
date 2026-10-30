@@ -1,6 +1,7 @@
 param()
 $ErrorActionPreference = 'Continue'
 $dir = $PSScriptRoot
+$portFile = Join-Path $dir '.server_port'
 
 function Find-Python {
     foreach ($c in @('python','py')) {
@@ -30,6 +31,53 @@ if (-not $pyExe) {
     $pyExe = Join-Path $pyDir 'python.exe'
 }
 
-# Start server.py in background (detached), then exit so Stash considers the plugin loaded
-Start-Process $pyExe -ArgumentList "$dir\server.py" -WindowStyle Hidden | Out-Null
+# Ensure server.py is running
+$port = $null
+if (Test-Path $portFile) {
+    $port = Get-Content $portFile -ErrorAction SilentlyContinue
+}
+$serverUp = $false
+if ($port) {
+    try {
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/hello" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($r.StatusCode -eq 200) { $serverUp = $true }
+    } catch { }
+}
+if (-not $serverUp) {
+    Start-Process $pyExe -ArgumentList "$dir\server.py" -WindowStyle Hidden | Out-Null
+    # Wait for server to come up
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 200
+        if (Test-Path $portFile) {
+            $p2 = Get-Content $portFile -ErrorAction SilentlyContinue
+            try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$p2/hello" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+                if ($r.StatusCode -eq 200) { $serverUp = $true; $port = $p2; break }
+            } catch { }
+        }
+    }
+}
+
+# Read JSON input from stdin (from Stash)
+$input = $null
+try {
+    $input = [console]::In.ReadToEnd()
+} catch { }
+
+# Forward to server.py /execute and return response to stdout
+if ($port -and $serverUp) {
+    try {
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body $input -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
+        if ($r) {
+            $content = $r.Content
+            if ($content) { Write-Output $content }
+        } else {
+            Write-Output '{"output":{},"error":"no response from server"}'
+        }
+    } catch {
+        Write-Output ('{"output":{},"error":"' + $_.Exception.Message + '"}')
+    }
+} else {
+    Write-Output '{"output":{},"error":"terminal server not available"}'
+}
 exit 0
