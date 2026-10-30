@@ -45,7 +45,6 @@ if ($port) {
 }
 if (-not $serverUp) {
     Start-Process $pyExe -ArgumentList "$dir\server.py" -WindowStyle Hidden | Out-Null
-    # Wait for server to come up
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 200
         if (Test-Path $portFile) {
@@ -59,15 +58,39 @@ if (-not $serverUp) {
 }
 
 # Read JSON input from stdin (from Stash)
-$input = $null
+$inputStr = $null
 try {
-    $input = [console]::In.ReadToEnd()
+    $inputStr = [console]::In.ReadToEnd()
 } catch { }
 
-# Forward to server.py /execute and return response to stdout
+$input = $null
+if ($inputStr) {
+    try { $input = $inputStr | ConvertFrom-Json } catch { }
+}
+
+# Handle 'hello' directly — return port info
+if ($input -and $input.action -eq 'hello') {
+    $output = @{
+        output = @{
+            cwd = (Get-Location).Path
+            user = [Environment]::UserName
+            host = [Environment]::MachineName
+            os = [System.Environment]::OSVersion.VersionString
+            platform = 'Windows'
+            python = $pyExe
+            sep = '\'
+            drives = @()
+            server_port = [int]$port
+        }
+    }
+    $output | ConvertTo-Json
+    exit 0
+}
+
+# Forward other actions to server.py /execute
 if ($port -and $serverUp) {
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body $input -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body $inputStr -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
         if ($r) {
             $content = $r.Content
             if ($content) { Write-Output $content }
