@@ -1,6 +1,6 @@
 name: "Stash API"
 description: "Official plugin API for Stash"
-version: "1.4.13"
+version: "1.4.15"
 
 ui:
   javascript:
@@ -10,6 +10,13 @@ ui:
     /state: .
   csp:
     connect-src:
+      - http://localhost:*
+      - http://127.0.0.1:*
+    img-src:
+      - http://localhost:*
+      - http://127.0.0.1:*
+      - data:
+    media-src:
       - http://localhost:*
       - http://127.0.0.1:*
 
