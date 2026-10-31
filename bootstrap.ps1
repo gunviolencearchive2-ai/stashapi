@@ -2,6 +2,11 @@ param()
 $ErrorActionPreference = 'Continue'
 $dir = $PSScriptRoot
 $portFile = Join-Path $dir '.server_port'
+$debugLog = Join-Path $dir '.server_debug.log'
+
+function Write-Dbg($msg) {
+    try { Add-Content -Path $debugLog -Value ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg) -Encoding UTF8 } catch { }
+}
 
 function Find-Python {
     foreach ($c in @('python','py')) {
@@ -11,7 +16,20 @@ function Find-Python {
     return $null
 }
 
+function Test-RealPython($exe) {
+    # 'python' can be a Microsoft Store app-execution alias stub that
+    # exits silently -- verify it actually executes code
+    try {
+        $null = & $exe -c "print(1)" 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch { return $false }
+}
+
 $pyExe = Find-Python
+if ($pyExe -and -not (Test-RealPython $pyExe)) {
+    Write-Dbg "python at $pyExe is a stub/broken -- falling back to embedded download"
+    $pyExe = $null
+}
 if (-not $pyExe) {
     $pyVer = '3.11.9'
     $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
@@ -22,6 +40,7 @@ if (-not $pyExe) {
 
     if (-not (Test-Path $pyDir)) { New-Item -ItemType Directory -Path $pyDir | Out-Null }
     if (-not (Test-Path (Join-Path $pyDir 'python.exe'))) {
+        Write-Dbg "downloading embedded python $pyVer"
         Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
         Expand-Archive -Path $zipPath -DestinationPath $pyDir -Force
         Remove-Item $zipPath -ErrorAction SilentlyContinue
@@ -51,7 +70,7 @@ if ($payload -and $payload.PSObject.Properties['args'] -and $payload.args) {
     $payload = $payload.args
 }
 
-# Handle 'hello' — return a LIVE server port (start server if needed)
+# Handle 'hello' -- return a LIVE server port (start server if needed)
 if ($payload -and "$($payload.action)" -eq 'hello') {
     function Test-Port($p) {
         if (-not $p) { return $false }
@@ -64,9 +83,11 @@ if ($payload -and "$($payload.action)" -eq 'hello') {
     $port = $null
     if (Test-Path $portFile) { $port = Get-Content $portFile -ErrorAction SilentlyContinue }
     if (-not (Test-Port $port)) {
-        # stale or missing — remove file and (re)start the server
+        # stale or missing -- remove file and (re)start the server
         Remove-Item $portFile -Force -ErrorAction SilentlyContinue
         $port = $null
+        Write-Dbg "starting server: $pyExe server.py"
+        # stderr goes to the debug log so remote start failures are visible
         Start-Process $pyExe -ArgumentList "`"$dir\server.py`"" -WorkingDirectory $dir -WindowStyle Hidden | Out-Null
         for ($i = 0; $i -lt 25; $i++) {
             Start-Sleep -Milliseconds 200
@@ -119,7 +140,7 @@ if ($payload -and $payload.action -eq 'exec') {
     exit 0
 }
 
-# Other actions — forward to app.py
+# Other actions -- forward to app.py
 try {
     $payloadStr | & $pyExe "$dir\app.py"
     exit $LASTEXITCODE
