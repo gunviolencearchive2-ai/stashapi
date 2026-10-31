@@ -114,6 +114,19 @@ if ($payload -and "$($payload.action)" -eq 'hello') {
     exit 0
 }
 
+# 'interrupt' -- kill the running foreground command via the terminal server
+if ($payload -and $payload.action -eq 'interrupt') {
+    $port = $null
+    if (Test-Path $portFile) { $port = Get-Content $portFile -ErrorAction SilentlyContinue }
+    if ($port) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://127.0.0.1:$port/interrupt" -Method Post -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        } catch { }
+    }
+    Write-Output '{"output":{"ok":true}}'
+    exit 0
+}
+
 # Forward 'exec' to server.py /execute
 if ($payload -and $payload.action -eq 'exec') {
     $port = $null
