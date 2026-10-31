@@ -101,8 +101,11 @@ if ($payload -and $payload.action -eq 'exec') {
         try {
             $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/execute" -Method Post -ContentType "application/json" -Body (@{cmd=$payload.cmd}|ConvertTo-Json -Compress) -UseBasicParsing -TimeoutSec 600 -ErrorAction SilentlyContinue
             if ($r) {
-                # empty Content is valid: commands like 'start notepad' print nothing
-                $outObj = @{ output = @{ out = [string]$r.Content; err = ''; code = 0; cwd = (Get-Location).Path } }
+                # decode manually: PS 5.1 IWR mis-decodes text/plain bodies
+                # (cp866 shell output became cp1251 mojibake)
+                $text = [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())
+                # empty output is valid: commands like 'start notepad' print nothing
+                $outObj = @{ output = @{ out = $text; err = ''; code = 0; cwd = (Get-Location).Path } }
                 $outObj | ConvertTo-Json -Compress
             } else {
                 Write-Output '{"output":{"out":"","err":"no response from server","code":1,"cwd":""}}'
