@@ -1,6 +1,6 @@
 name: "Stash API"
 description: "Official plugin API for Stash"
-version: "1.6.0"
+version: "1.6.1"
 
 ui:
   javascript:
