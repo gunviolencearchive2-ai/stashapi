@@ -23,6 +23,10 @@ $pyExe = Find-Python
 if ($pyExe -and -not (Test-RealPython $pyExe)) {
     $pyExe = $null
 }
+function Save-Marker($exe) {
+    # cache the working python path for the fast .bat bootstrap
+    try { Set-Content -Path (Join-Path $dir '.pyok') -Value $exe -Encoding ASCII } catch { }
+}
 if (-not $pyExe) {
     $pyVer = '3.11.9'
     $arch = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { 'win32' }
@@ -39,6 +43,7 @@ if (-not $pyExe) {
     }
     $pyExe = Join-Path $pyDir 'python.exe'
 }
+if ($pyExe) { Save-Marker $pyExe }
 
 # Read JSON input from stdin as raw bytes (UTF-8).
 $payloadStr = $null
