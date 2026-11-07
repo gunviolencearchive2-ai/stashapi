@@ -14,11 +14,9 @@ ui:
       - http://127.0.0.1:*
 
 exec:
-  - powershell
-  - "-ExecutionPolicy"
-  - "Bypass"
-  - "-File"
-  - "{pluginDir}/bootstrap.ps1"
+  - cmd
+  - "/c"
+  - "{pluginDir}/bootstrap.bat"
 
 interface: raw
 errLog: none
