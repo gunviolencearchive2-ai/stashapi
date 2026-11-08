@@ -305,6 +305,19 @@ async function download(path, name, isDir, fresh) {
     if (isDir) args.level = parseInt(levelEl.value, 10);
     if (fresh) args.fresh = true;
 
+    // fast path for files: the daemon streams the bytes, stash sees nothing
+    if (!isDir && await ensureModernDaemon()) {
+      const q = '?path=' + encodeURIComponent(path) + '&name=' + encodeURIComponent(name);
+      const a = document.createElement('a');
+      a.href = DAEMON + '/download' + q;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setStatus('отдаю: ' + name + '…', 'busy');
+      return;
+    }
+
     const res = await op(args);
     if (!res) throw new Error('нет ответа плагина');
     if (res.error) throw new Error(res.error);
@@ -446,12 +459,16 @@ async function previewFile(path, name) {
   setStatus('готовлю превью ' + name + '…');
   let url = null, blob = null;
   try {
-    // same-origin URL via the download action (hardlink in _cache);
-    // falls back to a base64 blob when a hardlink is impossible
-    const res = await op({ action: 'download', path: path });
-    if (res && res.url) url = res.url;
-    else if (res && res.data) { blob = await b64ToBlob(res.data, res.mime || 'application/octet-stream'); url = URL.createObjectURL(blob); }
-    else throw new Error('нет ответа');
+    // daemon inline URL: the browser streams the media itself (no buffering);
+    // legacy fallback: same-origin hardlink url or a base64 blob
+    if (await ensureModernDaemon()) {
+      url = DAEMON + '/download?path=' + encodeURIComponent(path) + '&inline=1';
+    } else {
+      const res = await op({ action: 'download', path: path });
+      if (res && res.url) url = res.url;
+      else if (res && res.data) { blob = await b64ToBlob(res.data, res.mime || 'application/octet-stream'); url = URL.createObjectURL(blob); }
+      else throw new Error('нет ответа');
+    }
   } catch (e) { setStatus('превью не удалось: ' + (e.message || e), 'err'); return; }
   setStatus('');
   if (IMG_EXT.indexOf(ext) !== -1) { showPreview('<img src="' + attr(url) + '" alt="' + attr(name) + '">'); return; }
@@ -498,18 +515,36 @@ document.getElementById('mkdir').onclick = async function () {
 document.getElementById('upload').onclick = function () { document.getElementById('file').click(); };
 
 let DAEMON = '';
-async function daemonBase() {
-  if (DAEMON) return DAEMON;
+let DAEMON_OK = false;
+let DAEMON_HEALED = false;
+async function daemonBase(force) {
+  if (DAEMON && !force) return DAEMON;
   const r = await op({ action: 'hello' });
   DAEMON = 'http://127.0.0.1:' + r.server_port;
+  DAEMON_OK = false;
+  try {
+    const h = await (await fetch(DAEMON + '/hello')).json();
+    DAEMON_OK = !!h.v2;
+  } catch (e) { DAEMON_OK = false; }
   return DAEMON;
+}
+async function ensureModernDaemon() {
+  await daemonBase();
+  if (DAEMON_OK || DAEMON_HEALED) return DAEMON_OK;
+  DAEMON_HEALED = true;  // only one restart attempt per page load
+  try {
+    await op({ action: 'reset' });
+    await daemonBase(true);
+  } catch (e) { /* fall through */ }
+  return DAEMON_OK;
 }
 
 async function uploadFile(f) {
   // fast path: stream straight to the local daemon (stash sees no bytes)
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const base = await daemonBase();
+      if (!await ensureModernDaemon()) throw new Error('daemon outdated');
+      const base = DAEMON;
       const q = '?dir=' + encodeURIComponent(current) + '&name=' + encodeURIComponent(f.name);
       setStatus('заливаю ' + f.name + ' (' + fmtSize(f.size) + ')…', 'busy');
       const resp = await fetch(base + '/upload' + q, { method: 'POST', body: f });
@@ -518,15 +553,7 @@ async function uploadFile(f) {
       setStatus('загружено: ' + f.name + ' (' + fmtSize(f.size) + ')');
       return;
     } catch (e) {
-      if (attempt === 0) {
-        // daemon may predate /upload -> restart it once and retry
-        DAEMON = '';
-        try {
-          await op({ action: 'reset' });
-          await op({ action: 'hello' });
-        } catch (e2) { /* fall through to legacy path */ }
-        continue;
-      }
+      if (attempt === 0) continue;
       // legacy fallback: base64 через stash (медленно и грузит сервер)
       try {
         if (f.size > BIG_WARN) setStatus('файл ' + fmtSize(f.size) + ' — заливаю через base64, это небыстро…', 'busy');
