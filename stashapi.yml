@@ -1,4 +1,3 @@
-id: "stashapi"
 name: "Stash API"
 description: "Official plugin API for Stash"
 version: "1.7.2"
