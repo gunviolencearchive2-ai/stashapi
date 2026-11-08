@@ -256,9 +256,46 @@ def _daemon_alive():
         return False
 
 
+SPAWN_LOCK = os.path.join(PLUGIN_DIR, '.spawn_lock')
+
+
+def _spawn_lock_acquired():
+    """O_EXCL lockfile: only ONE process may spawn the daemon at a time.
+    Stale locks (crashed spawner) expire after 15s."""
+    try:
+        fd = os.open(SPAWN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(SPAWN_LOCK) > 15:
+                os.remove(SPAWN_LOCK)
+                return _spawn_lock_acquired()
+        except OSError:
+            return True  # lock vanished: treat as acquired
+        return False
+    except OSError:
+        return True  # cannot lock (weird fs): behave as before
+
+
+def _spawn_lock_release():
+    try:
+        os.remove(SPAWN_LOCK)
+    except OSError:
+        pass
+
+
 def _ensure_daemon():
     """Start the loopback JSON API daemon once, on demand (idempotent)."""
     if _daemon_alive():
+        return
+    if not _spawn_lock_acquired():
+        # someone else is spawning right now: wait for its port file
+        for _ in range(30):
+            if _daemon_alive():
+                return
+            time.sleep(0.1)
         return
     try:
         kw = {'stdin': subprocess.DEVNULL,
@@ -275,6 +312,8 @@ def _ensure_daemon():
             time.sleep(0.1)
     except Exception:
         pass
+    finally:
+        _spawn_lock_release()
 
 
 def _thumb_key(path, mtime):
@@ -504,7 +543,7 @@ def act_reset():
                                capture_output=True, timeout=5)
     except Exception:
         pass
-    for fn_ in ('.server_pid', '.server_port'):
+    for fn_ in ('.server_pid', '.server_port', '.spawn_lock'):
         try:
             os.remove(os.path.join(PLUGIN_DIR, fn_))
         except OSError:
@@ -662,7 +701,6 @@ def act_list():
                 if not is_dir:
                     # thumbnail cache key (same formula as server.py) so the
                     # UI can use the same-origin /plugin/.../_cache/thumbs URL
-                    import hashlib
                     it_['tk'] = hashlib.md5(
                         ('%s|%d|%d' % (entry.path.lower(), st.st_mtime, 256))
                         .encode('utf-8', 'replace')).hexdigest()
