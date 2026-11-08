@@ -134,13 +134,32 @@ def _run_exec(cmd, cwd, timeout):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+    timeout = 300  # per-request socket timeout: a stuck client frees its thread
 
     def log_message(self, format, *args):
         pass
 
+    def _origin_ok(self):
+        """CSRF shield: browser requests always carry Origin/Referer from the
+        Stash page (localhost). A foreign site's page would carry ITS origin
+        here (DNS-rebinding keeps the host the same but not the Origin header).
+        Non-browser clients (curl/python) send none and are allowed."""
+        for h in ('Origin', 'Referer'):
+            val = self.headers.get(h)
+            if not val:
+                continue
+            try:
+                host = urllib.parse.urlsplit(val).hostname or ''
+            except ValueError:
+                return False
+            if host not in ('localhost', '127.0.0.1', '::1'):
+                return False
+        return True
+
     def _headers(self, code, ctype, body):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Content-Length', str(len(body)))
         # ALWAYS close: keep-alive sockets make browser/tooling clients hang
         self.send_header('Connection', 'close')
@@ -163,14 +182,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             self._plain(403, '{"err":"loopback only"}')
             return
+        if not self._origin_ok():
+            self._plain(403, '{"err":"foreign origin"}')
+            return
         if self.path == '/hello':
-            self._plain(200, json.dumps({'ok': True, 'port': SERVER_PORT}))
+            self._plain(200, json.dumps({'ok': True, 'port': SERVER_PORT, 'v2': True}))
+            return
+
+        if self.path.startswith('/download'):
+            self._serve_download()
             return
         self._plain(404, '{"err":"not found"}')
+
+    def _serve_download(self):
+        """Stream a file to the browser: no buffering, no base64, no stash.
+        ?path=<file>&name=<save-as>&inline=1 (inline=1 -> shown, not saved)."""
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            path = q.get('path', [''])[0]
+            name = os.path.basename(q.get('name', [''])[0]) or os.path.basename(path)
+            inline = q.get('inline', [''])[0] == '1'
+            if not path or not os.path.isfile(path):
+                self._plain(404, '{"err":"not a file"}')
+                return
+            import mimetypes
+            size = os.path.getsize(path)
+            ctype = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+            disp = 'inline' if inline else 'attachment'
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(size))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Disposition',
+                             "%s; filename*=UTF-8''%s" % (disp, urllib.parse.quote(name)))
+            self.send_header('Connection', 'close')
+            self.close_connection = True
+            self.end_headers()
+            with open(path, 'rb') as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            _log('download ok: %s (%d bytes)' % (path, size))
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            _log('download aborted by client')
+        except Exception as ex:
+            _log('download failed: %r' % ex)
+            try:
+                self._plain(500, json.dumps({'ok': False, 'err': str(ex)}))
+            except Exception:
+                pass
 
     def do_POST(self):
         if not self._loopback():
             self._plain(403, '{"err":"loopback only"}')
+            return
+        if not self._origin_ok():
+            self._plain(403, '{"err":"foreign origin"}')
             return
 
         # streaming upload: body goes to disk in chunks, never buffered whole
