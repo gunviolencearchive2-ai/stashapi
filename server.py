@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 IS_WIN = os.name == 'nt'
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -171,6 +172,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             self._plain(403, '{"err":"loopback only"}')
             return
+
+        # streaming upload: body goes to disk in chunks, never buffered whole
+        if self.path.startswith('/upload'):
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                dirp = q.get('dir', [''])[0]
+                name = os.path.basename(q.get('name', [''])[0])
+                if not dirp or not name or not os.path.isdir(dirp):
+                    self._plain(400, '{"err":"bad dir/name"}')
+                    return
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                except ValueError:
+                    length = 0
+                if 'Content-Length' not in self.headers:
+                    # chunked bodies are not supported: fail fast instead of
+                    # writing an empty file while the client keeps streaming
+                    self._plain(411, '{"err":"Content-Length required"}')
+                    return
+                target = os.path.join(dirp, name)
+                n = 0
+                with open(target, 'wb') as fo:
+                    remaining = length
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        fo.write(chunk)
+                        n += len(chunk)
+                        remaining -= len(chunk)
+                self._plain(200, json.dumps({'ok': True, 'path': target, 'size': n}))
+            except Exception as ex:
+                _log('upload failed: %r' % ex)
+                self._plain(500, json.dumps({'ok': False, 'err': str(ex)}))
+            return
+
         try:
             length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(length) or b'{}')
@@ -232,6 +269,12 @@ def main():
     try:
         with open(PORT_FILE, 'w') as f:
             f.write(str(SERVER_PORT))
+    except OSError:
+        pass
+    # pid file so act_reset can restart the daemon when its code changes
+    try:
+        with open(os.path.join(PLUGIN_DIR, '.server_pid'), 'w') as f:
+            f.write(str(os.getpid()))
     except OSError:
         pass
 
