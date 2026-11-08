@@ -465,7 +465,51 @@ def act_hello():
 
 
 def act_reset():
-    return {'ok': True, 'cwd': os.getcwd()}
+    # restart the local JSON daemon so it picks up new server.py code
+    try:
+        pid = int(open(os.path.join(PLUGIN_DIR, '.server_pid')).read().strip())
+        _kill_tree(pid)
+    except Exception:
+        pass
+    # daemon may predate the pid file, or sit on an older port: sweep our
+    # port range and kill leftover python listeners (never other software)
+    try:
+        if os.name == 'nt':
+            out = subprocess.run(['netstat', '-ano', '-p', 'TCP'],
+                                 capture_output=True, text=True, timeout=15).stdout
+            for ln in out.splitlines():
+                parts = ln.split()
+                # columns: proto local remote state pid; state is locale-dependent
+                if len(parts) < 5 or not parts[1].startswith('127.0.0.1:'):
+                    continue
+                try:
+                    if not 17653 <= int(parts[1].rsplit(':', 1)[1]) <= 17702:
+                        continue
+                except ValueError:
+                    continue
+                if not (parts[3].upper().startswith('LISTEN') or
+                        parts[3].upper().startswith('ПРОСЛУШ')):
+                    continue
+                pid = parts[-1]
+                if not pid.isdigit() or int(pid) == os.getpid():
+                    continue
+                ti = subprocess.run(['tasklist', '/FI', 'PID eq %s' % pid],
+                                    capture_output=True, text=True, timeout=10).stdout.lower()
+                if 'python' in ti:
+                    subprocess.run(['taskkill', '/F', '/PID', pid],
+                                   capture_output=True, timeout=10)
+        else:
+            for port_ in range(17653, 17703):
+                subprocess.run(['fuser', '-k', '%d/tcp' % port_],
+                               capture_output=True, timeout=5)
+    except Exception:
+        pass
+    for fn_ in ('.server_pid', '.server_port'):
+        try:
+            os.remove(os.path.join(PLUGIN_DIR, fn_))
+        except OSError:
+            pass
+    return {'ok': True}
 
 
 PID_FILE = os.path.join(PLUGIN_DIR, '.cmd_pid')
