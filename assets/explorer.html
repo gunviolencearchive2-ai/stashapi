@@ -497,18 +497,49 @@ document.getElementById('mkdir').onclick = async function () {
 
 document.getElementById('upload').onclick = function () { document.getElementById('file').click(); };
 
+let DAEMON = '';
+async function daemonBase() {
+  if (DAEMON) return DAEMON;
+  const r = await op({ action: 'hello' });
+  DAEMON = 'http://127.0.0.1:' + r.server_port;
+  return DAEMON;
+}
+
 async function uploadFile(f) {
-  if (f.size > BIG_WARN) setStatus('файл ' + fmtSize(f.size) + ' — заливаю через base64, это небыстро…', 'busy');
-  const b64 = await new Promise(function (res) {
-    const fr = new FileReader();
-    fr.onload = function () { res(String(fr.result).split(',')[1]); };
-    fr.readAsDataURL(f);
-  });
-  try {
-    setStatus('заливаю ' + f.name + '…', 'busy');
-    await op({ action: 'upload', path: current, name: f.name, data: b64 });
-    setStatus('загружено: ' + f.name);
-  } catch (e) { setStatus('ошибка загрузки: ' + (e.message || e), 'err'); }
+  // fast path: stream straight to the local daemon (stash sees no bytes)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const base = await daemonBase();
+      const q = '?dir=' + encodeURIComponent(current) + '&name=' + encodeURIComponent(f.name);
+      setStatus('заливаю ' + f.name + ' (' + fmtSize(f.size) + ')…', 'busy');
+      const resp = await fetch(base + '/upload' + q, { method: 'POST', body: f });
+      if (resp.status === 404) throw new Error('daemon outdated');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      setStatus('загружено: ' + f.name + ' (' + fmtSize(f.size) + ')');
+      return;
+    } catch (e) {
+      if (attempt === 0) {
+        // daemon may predate /upload -> restart it once and retry
+        DAEMON = '';
+        try {
+          await op({ action: 'reset' });
+          await op({ action: 'hello' });
+        } catch (e2) { /* fall through to legacy path */ }
+        continue;
+      }
+      // legacy fallback: base64 через stash (медленно и грузит сервер)
+      try {
+        if (f.size > BIG_WARN) setStatus('файл ' + fmtSize(f.size) + ' — заливаю через base64, это небыстро…', 'busy');
+        const b64 = await new Promise(function (res) {
+          const fr = new FileReader();
+          fr.onload = function () { res(String(fr.result).split(',')[1]); };
+          fr.readAsDataURL(f);
+        });
+        await op({ action: 'upload', path: current, name: f.name, data: b64 });
+        setStatus('загружено: ' + f.name);
+      } catch (e3) { setStatus('ошибка загрузки: ' + (e3.message || e3), 'err'); }
+    }
+  }
 }
 
 document.getElementById('file').onchange = async function (ev) {
