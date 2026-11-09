@@ -278,10 +278,11 @@ async function load(p) {
     shown = 0;
     paint(false);
 
-    if (res.error) setStatus(res.error, 'err');
+    const trunc = res.truncated ? (' (в папке всего ' + (res.total || allItems.length) + ')') : '';
+    if (res.error) setStatus(res.error + trunc, 'err');
     else if (!allItems.length) setStatus('пусто');
-    else if (shown >= allItems.length) setStatus(allItems.length + ' элементов');
-    else setStatus(shown + ' из ' + allItems.length + ' — есть ещё');
+    else if (shown >= allItems.length) setStatus(allItems.length + '+' + ' элементов' + trunc);
+    else setStatus(shown + ' из ' + allItems.length + trunc + ' — есть ещё');
   } catch (e) {
     setStatus(String(e.message || e), 'err');
   }
@@ -514,10 +515,12 @@ document.getElementById('mkdir').onclick = async function () {
 
 document.getElementById('upload').onclick = function () { document.getElementById('file').click(); };
 
+const LOCAL_PAGE = /^localhost$|^127\.\d+\.\d+\.\d+$|^\[::1\]$/.test(location.hostname);
 let DAEMON = '';
 let DAEMON_OK = false;
 let DAEMON_HEALED = false;
 async function daemonBase(force) {
+  if (!LOCAL_PAGE) return '';
   if (DAEMON && !force) return DAEMON;
   const r = await op({ action: 'hello' });
   DAEMON = 'http://127.0.0.1:' + r.server_port;
@@ -529,6 +532,7 @@ async function daemonBase(force) {
   return DAEMON;
 }
 async function ensureModernDaemon() {
+  if (!LOCAL_PAGE) return false;
   await daemonBase();
   if (DAEMON_OK || DAEMON_HEALED) return DAEMON_OK;
   DAEMON_HEALED = true;  // only one restart attempt per page load
@@ -554,16 +558,29 @@ async function uploadFile(f) {
       return;
     } catch (e) {
       if (attempt === 0) continue;
-      // legacy fallback: base64 через stash (медленно и грузит сервер)
+      // legacy fallback: chunked base64 через stash (каждый оп <=6MB,
+      // stash не надувается и не падает по OOM на удалённом сервере)
       try {
-        if (f.size > BIG_WARN) setStatus('файл ' + fmtSize(f.size) + ' — заливаю через base64, это небыстро…', 'busy');
-        const b64 = await new Promise(function (res) {
-          const fr = new FileReader();
-          fr.onload = function () { res(String(fr.result).split(',')[1]); };
-          fr.readAsDataURL(f);
-        });
-        await op({ action: 'upload', path: current, name: f.name, data: b64 });
-        setStatus('загружено: ' + f.name);
+        const CH = 6 * 1024 * 1024;
+        const sid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        for (let off = 0; off < f.size; ) {
+          const end = Math.min(off + CH, f.size);
+          const b64 = await new Promise(function (res, rej) {
+            const fr = new FileReader();
+            fr.onload = function () { res(String(fr.result).split(',')[1]); };
+            fr.onerror = function () { rej(new Error('read fail')); };
+            fr.readAsDataURL(f.slice(off, end));
+          });
+          const r = await op({ action: 'upload', path: current, name: f.name,
+                               session: sid, offset: off, chunk: b64,
+                               last: end >= f.size });
+          if (!r) throw new Error('нет ответа плагина');
+          if (r.error) throw new Error(r.error);
+          off = end;
+          setStatus('заливаю ' + f.name + ': ' +
+                    Math.min(99, Math.round(off * 100 / f.size)) + '%', 'busy');
+        }
+        setStatus('загружено: ' + f.name + ' (' + fmtSize(f.size) + ')');
       } catch (e3) { setStatus('ошибка загрузки: ' + (e3.message || e3), 'err'); }
     }
   }
