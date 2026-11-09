@@ -28,18 +28,34 @@ ARGS = {}
 
 # --------------------------------------------------------------------- io ----
 
+MAX_INPUT = 64 * 1024 * 1024  # a bigger single payload = OOM class, refuse it
+INPUT_OVERSIZE = False
+
+
 def read_input():
-    global INPUT, ARGS
+    global INPUT, ARGS, INPUT_OVERSIZE
     raw = b''
     env_in = os.environ.get('STASH_INPUT')
     if env_in:
         raw = env_in.encode('utf-8', 'replace')
     if not raw:
         try:
-            raw = sys.stdin.buffer.read()
+            parts, total = [], 0
+            while True:
+                b = sys.stdin.buffer.read(1 << 20)
+                if not b:
+                    break
+                total += len(b)
+                if total > MAX_INPUT:
+                    INPUT_OVERSIZE = True
+                    break
+                parts.append(b)
+            raw = b''.join(parts)
         except Exception:
             pass
-    if raw.strip():
+    if len(raw) > MAX_INPUT:
+        INPUT_OVERSIZE = True
+    if raw.strip() and not INPUT_OVERSIZE:
         for enc in ('utf-8-sig', 'utf-8', 'cp1251', 'latin-1'):
             try:
                 INPUT = json.loads(raw.decode(enc))
@@ -296,6 +312,9 @@ def _ensure_daemon():
             if _daemon_alive():
                 return
             time.sleep(0.1)
+        return
+    if _daemon_alive():  # re-check under the lock: the other spawner may have won
+        _spawn_lock_release()
         return
     try:
         kw = {'stdin': subprocess.DEVNULL,
@@ -687,9 +706,15 @@ def act_list():
     if not os.path.isdir(path):
         return {'error': 'Не папка: ' + path, 'path': path, 'items': [], 'drives': drives()}
     items = []
+    total = 0
     try:
         with os.scandir(path) as it:
             for entry in it:
+                if entry.name.startswith('.up_') and entry.name.endswith('.part'):
+                    continue  # transient chunked-upload temp file
+                total += 1
+                if len(items) >= 50000:
+                    continue  # cap RAM: count the rest, don't build JSON for it
                 try:
                     is_dir = entry.is_dir()
                     st = entry.stat(follow_symlinks=False)
@@ -710,7 +735,8 @@ def act_list():
     items.sort(key=lambda x: (not x['dir'], x['name'].lower()))
     parent = os.path.dirname(path)
     return {'path': path, 'parent': None if parent == path else parent,
-            'items': items, 'drives': drives()}
+            'items': items, 'total': total, 'truncated': total > len(items),
+            'drives': drives()}
 
 
 DS_CACHE_FILE = os.path.join(PLUGIN_DIR, '.dirsizes.json')
@@ -791,8 +817,51 @@ def act_rename():
 def act_upload():
     folder = norm(ARGS.get('path'))
     name = os.path.basename(str(ARGS.get('name') or 'upload.bin'))
-    data = base64.b64decode(str(ARGS.get('data') or ''))
     dest = os.path.join(folder, name)
+    sess = str(ARGS.get('session') or '')
+    if sess and 'chunk' in ARGS:
+        # chunked upload: append base64 slices to a .part file, assemble on last
+        if not re.match(r'^[A-Za-z0-9_-]{1,40}$', sess):
+            return {'ok': False, 'error': 'bad session id'}
+        part = os.path.join(folder, '.up_%s_%s.part' % (sess, path_hash(dest)))
+        try:
+            off = int(ARGS.get('offset') or 0)
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'bad offset'}
+        if off < 0:
+            return {'ok': False, 'error': 'bad offset'}
+        try:
+            expect = os.path.getsize(part) if os.path.isfile(part) else 0
+        except OSError:
+            expect = 0
+        if off != expect:
+            return {'ok': False, 'error': 'offset mismatch: got %d, expect %d' % (off, expect),
+                    'expect': expect}
+        if off == 0:
+            # sweep orphaned .part files of dead sessions (older than 1h)
+            now = time.time()
+            try:
+                for fn in os.listdir(folder):
+                    if fn.startswith('.up_') and fn.endswith('.part'):
+                        p2 = os.path.join(folder, fn)
+                        try:
+                            if now - os.path.getmtime(p2) > 3600:
+                                os.remove(p2)
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        try:
+            data = base64.b64decode(str(ARGS.get('chunk') or ''))
+            with open(part, 'ab') as fh:
+                fh.write(data)
+            if ARGS.get('last'):
+                os.replace(part, dest)
+            size = os.path.getsize(dest) if ARGS.get('last') else os.path.getsize(part)
+        except OSError as ex:
+            return {'ok': False, 'error': str(ex)}
+        return {'ok': True, 'path': dest, 'size': size}
+    data = base64.b64decode(str(ARGS.get('data') or ''))
     with open(dest, 'wb') as fh:
         fh.write(data)
     return {'ok': True, 'path': dest, 'size': len(data)}
@@ -845,7 +914,17 @@ HANDLERS = {
 def main():
     cleanup_serve_dir()
     read_input()
+    if INPUT_OVERSIZE:
+        emit({}, 'Полезная нагрузка >64MB. Обнови страницу эксплорера (Ctrl+F5): '
+                 'v1.8.3 грузит файлы чанками и не убивает сервер OOM.')
+        return
     action = str(ARGS.get('action') or 'hello')
+    if action not in ('download', 'dirsize'):
+        # hard watchdog: a wedged op must never pin the plugin host forever;
+        # streaming ops (zip/download/dirsize walk) are exempt
+        _wd = threading.Timer(900, lambda: os._exit(3))
+        _wd.daemon = True
+        _wd.start()
     if action == 'download':
         act_download()
         return
