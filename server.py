@@ -183,6 +183,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._plain(403, '{"err":"loopback only"}')
             return
         if not self._origin_ok():
+            _log('403 foreign origin: %s' % (self.headers.get('Origin') or
+                                             self.headers.get('Referer') or '-'))
             self._plain(403, '{"err":"foreign origin"}')
             return
         if self.path == '/hello':
@@ -239,6 +241,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._plain(403, '{"err":"loopback only"}')
             return
         if not self._origin_ok():
+            _log('403 foreign origin: %s' % (self.headers.get('Origin') or
+                                             self.headers.get('Referer') or '-'))
             self._plain(403, '{"err":"foreign origin"}')
             return
 
