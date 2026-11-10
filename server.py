@@ -58,7 +58,78 @@ def _kill_tree(pid):
         _log('kill_tree: %r' % ex)
 
 
-def _run_exec(cmd, cwd, timeout):
+EXEC_RAM_MB = 1536  # exec'd children live in a RAM box: a runaway exe
+                    # must never starve stash (Go dies on failed commit -> 503)
+
+
+def _win_job_create(limit_mb):
+    """Job object: per-process memory ceiling + kill-on-close. The whole
+    exec'd tree (cmd -> exe -> grandchildren) gets its own RAM box."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+
+        class _IO(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                'ReadOperationCount', 'WriteOperationCount', 'OtherOperationCount',
+                'ReadTransferCount', 'WriteTransferCount', 'OtherTransferCount')]
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [
+                ('PerProcessUserTimeLimit', ctypes.c_int64),
+                ('PerJobUserTimeLimit', ctypes.c_int64),
+                ('LimitFlags', wintypes.DWORD),
+                ('MinimumWorkingSetSize', ctypes.c_size_t),
+                ('MaximumWorkingSetSize', ctypes.c_size_t),
+                ('ActiveProcessLimit', wintypes.DWORD),
+                ('Affinity', ctypes.c_size_t),
+                ('PriorityClass', wintypes.DWORD),
+                ('SchedulingClass', wintypes.DWORD)]
+
+        class _Ext(ctypes.Structure):
+            _fields_ = [('BasicLimitInformation', _Basic), ('IoInfo', _IO),
+                        ('ProcessMemoryLimit', ctypes.c_size_t),
+                        ('JobMemoryLimit', ctypes.c_size_t),
+                        ('PeakProcessMemoryUsed', ctypes.c_size_t),
+                        ('PeakJobMemoryUsed', ctypes.c_size_t)]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _Ext()
+        info.BasicLimitInformation.LimitFlags = 0x100 | 0x2000  # PROCESS_MEMORY | KILL_ON_JOB_CLOSE
+        info.ProcessMemoryLimit = limit_mb * 1024 * 1024
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            k32.CloseHandle(job)
+            return None
+        return job
+    except Exception:
+        return None
+
+
+def _parse_ram_mb(raw):
+    try:
+        ram = int(raw or 0)
+    except (TypeError, ValueError):
+        ram = 0
+    if ram <= 0:
+        ram = EXEC_RAM_MB
+    return max(128, min(16384, ram))
+
+
+def _linux_rlimit_fn(limit_mb):
+    def _fn():
+        try:
+            import resource
+            b = limit_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (b, b))
+        except Exception:
+            pass
+    return _fn
+
+
+def _run_exec(cmd, cwd, timeout, ram_mb=0):
     if not cmd:
         return {'out': '', 'err': '', 'code': 0, 'cwd': cwd}
     if IS_WIN:
@@ -67,13 +138,27 @@ def _run_exec(cmd, cwd, timeout):
         shell_cmd = 'cd "%s" && %s' % (cwd.replace('"', ''), cmd)
     if timeout <= 0:
         timeout = 600.0
+    if ram_mb <= 0:
+        ram_mb = EXEC_RAM_MB
+    ram_mb = max(128, min(16384, ram_mb))
+    job = None
+    popen_kw = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE,
+                'stdin': subprocess.DEVNULL, 'cwd': cwd,
+                'start_new_session': not IS_WIN}
+    if IS_WIN:
+        job = _win_job_create(ram_mb)
+    else:
+        popen_kw['preexec_fn'] = _linux_rlimit_fn(ram_mb)
     try:
-        proc = subprocess.Popen(shell_cmd, shell=True, cwd=cwd,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                stdin=subprocess.DEVNULL,
-                                start_new_session=not IS_WIN)
+        proc = subprocess.Popen(shell_cmd, shell=True, **popen_kw)
     except OSError as ex:
         return {'out': '', 'err': str(ex), 'code': 1, 'cwd': cwd}
+    if job:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.AssignProcessToJobObject(job, int(proc._handle))
+        except Exception:
+            job = None
 
     with PID_LOCK:
         try:
@@ -110,6 +195,13 @@ def _run_exec(cmd, cwd, timeout):
             _kill_tree(proc.pid)
             break
     proc.wait(timeout=30)
+
+    if job:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(job)
+        except Exception:
+            pass
 
     with PID_LOCK:
         try:
@@ -309,7 +401,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 timeout = 0
             try:
-                res = _run_exec(cmd, cwd, timeout)
+                res = _run_exec(cmd, cwd, timeout, _parse_ram_mb(data.get('ram')))
             except Exception as ex:
                 _log('execute failed: %r' % ex)
                 res = {'out': '', 'err': str(ex), 'code': 1, 'cwd': cwd}
