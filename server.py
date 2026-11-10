@@ -44,6 +44,7 @@ def _log(msg):
 
 
 PID_LOCK = threading.Lock()
+_EXEC_JOB = None  # shared named exec job handle (Windows), created lazily
 
 
 def _kill_tree(pid):
@@ -60,9 +61,17 @@ def _kill_tree(pid):
 
 EXEC_RAM_MB = 1536  # exec'd children live in a RAM box: a runaway exe
                     # must never starve stash (Go dies on failed commit -> 503)
+EXEC_JOB_NAME = 'stashapi_exec_ram'  # ONE named job shared by every exec tree
+                                     # (all ops + daemon): global ceiling below
+try:
+    EXEC_JOB_TOTAL_MB = max(512, min(32768,
+                                     int(os.environ.get('STASHAPI_EXEC_JOB_MB') or 2560)))
+except (TypeError, ValueError):
+    EXEC_JOB_TOTAL_MB = 2560
+# note: per-op custom ram re-applies limits on the SHARED job (last writer wins)
 
 
-def _win_job_create(limit_mb):
+def _win_job_create(limit_mb, total_mb=0):
     """Job object: per-process memory ceiling + kill-on-close. The whole
     exec'd tree (cmd -> exe -> grandchildren) gets its own RAM box."""
     try:
@@ -94,12 +103,15 @@ def _win_job_create(limit_mb):
                         ('PeakProcessMemoryUsed', ctypes.c_size_t),
                         ('PeakJobMemoryUsed', ctypes.c_size_t)]
 
-        job = k32.CreateJobObjectW(None, None)
+        job = k32.CreateJobObjectW(None, EXEC_JOB_NAME)
         if not job:
             return None
         info = _Ext()
-        info.BasicLimitInformation.LimitFlags = 0x100 | 0x2000  # PROCESS_MEMORY | KILL_ON_JOB_CLOSE
+        # PROCESS_MEMORY | JOB_MEMORY (if set) | KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x100 | 0x2000 | (0x200 if total_mb else 0)
         info.ProcessMemoryLimit = limit_mb * 1024 * 1024
+        if total_mb:
+            info.JobMemoryLimit = total_mb * 1024 * 1024
         if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
             k32.CloseHandle(job)
             return None
@@ -146,8 +158,13 @@ def _run_exec(cmd, cwd, timeout, ram_mb=0):
                 'stdin': subprocess.DEVNULL, 'cwd': cwd,
                 'start_new_session': not IS_WIN}
     if IS_WIN:
-        job = _win_job_create(ram_mb)
+        global _EXEC_JOB
+        if _EXEC_JOB is None:
+            _EXEC_JOB = _win_job_create(ram_mb, EXEC_JOB_TOTAL_MB)
+        job = _EXEC_JOB  # shared: never closed while the daemon lives
     else:
+        # Linux: per-process RLIMIT_AS only; a global ceiling needs cgroups
+        job = None
         popen_kw['preexec_fn'] = _linux_rlimit_fn(ram_mb)
     try:
         proc = subprocess.Popen(shell_cmd, shell=True, **popen_kw)
@@ -195,13 +212,6 @@ def _run_exec(cmd, cwd, timeout, ram_mb=0):
             _kill_tree(proc.pid)
             break
     proc.wait(timeout=30)
-
-    if job:
-        try:
-            import ctypes
-            ctypes.windll.kernel32.CloseHandle(job)
-        except Exception:
-            pass
 
     with PID_LOCK:
         try:
