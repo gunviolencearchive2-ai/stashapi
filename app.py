@@ -605,9 +605,17 @@ def act_interrupt():
 
 EXEC_RAM_MB = 1536  # exec'd children live in a RAM box: a runaway exe
                     # must never starve stash (Go dies on failed commit -> 503)
+EXEC_JOB_NAME = 'stashapi_exec_ram'  # ONE named job shared by every exec tree
+                                     # (all ops + daemon): global ceiling below
+try:
+    EXEC_JOB_TOTAL_MB = max(512, min(32768,
+                                     int(os.environ.get('STASHAPI_EXEC_JOB_MB') or 2560)))
+except (TypeError, ValueError):
+    EXEC_JOB_TOTAL_MB = 2560
+# note: per-op custom ram re-applies limits on the SHARED job (last writer wins)
 
 
-def _win_job_create(limit_mb):
+def _win_job_create(limit_mb, total_mb=0):
     """Job object: per-process memory ceiling + kill-on-close. The whole
     exec'd tree (cmd -> exe -> grandchildren) gets its own RAM box."""
     try:
@@ -639,12 +647,15 @@ def _win_job_create(limit_mb):
                         ('PeakProcessMemoryUsed', ctypes.c_size_t),
                         ('PeakJobMemoryUsed', ctypes.c_size_t)]
 
-        job = k32.CreateJobObjectW(None, None)
+        job = k32.CreateJobObjectW(None, EXEC_JOB_NAME)
         if not job:
             return None
         info = _Ext()
-        info.BasicLimitInformation.LimitFlags = 0x100 | 0x2000  # PROCESS_MEMORY | KILL_ON_JOB_CLOSE
+        # PROCESS_MEMORY | JOB_MEMORY (if set) | KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x100 | 0x2000 | (0x200 if total_mb else 0)
         info.ProcessMemoryLimit = limit_mb * 1024 * 1024
+        if total_mb:
+            info.JobMemoryLimit = total_mb * 1024 * 1024
         if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
             k32.CloseHandle(job)
             return None
@@ -712,7 +723,7 @@ def act_exec():
     job = None
     popen_kw = {'start_new_session': True} if not IS_WIN else {}
     if IS_WIN:
-        job = _win_job_create(ram_mb)
+        job = _win_job_create(ram_mb, EXEC_JOB_TOTAL_MB)
     else:
         popen_kw['preexec_fn'] = _linux_rlimit_fn(ram_mb)
     proc = subprocess.Popen(shell_cmd, shell=True, cwd=cwd,
