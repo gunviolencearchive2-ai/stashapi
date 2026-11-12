@@ -424,8 +424,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
 SERVER_PORT = 0
 
 
+def _already_running():
+    """Single-instance guard: if a live daemon answers on the advertised
+    port, a second start (autostart task x plugin spawn race) must exit
+    silently instead of binding the next port and hijacking .server_port."""
+    try:
+        port = open(PORT_FILE).read().strip()
+    except OSError:
+        return False
+    if not port.isdigit():
+        return False
+    try:
+        import urllib.request
+        with urllib.request.urlopen('http://127.0.0.1:%s/hello' % port, timeout=1.0) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def main():
     global SERVER_PORT
+    if _already_running():
+        _log('already running -> exit')
+        sys.exit(0)
     socketserver.ThreadingTCPServer.allow_reuse_addr = True
     socketserver.ThreadingTCPServer.daemon_threads = True
 
